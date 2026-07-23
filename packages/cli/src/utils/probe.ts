@@ -4,10 +4,9 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 // Probe — connects to an MCP server and captures init + tool responses
 //
-// This is the abstraction layer between the CLI and the MCP transport
-// (stdio subprocess or SSE HTTP).  The real implementation will swap in
-// @modelcontextprotocol/sdk once the probing protocol stabilizes; the
-// interface stays the same so the commands never need to know.
+// This is the lightweight connectivity probe used by `scan` and `load-test`
+// commands.  For full multi-dimension probing, the `test` command delegates
+// to `probeServer()` from `@mcp-sentinel/core`.
 // ---------------------------------------------------------------------------
 
 // --- Local type definitions (mirror core until they are exported) ----------
@@ -50,16 +49,36 @@ interface JsonRpcRequest {
   params?: Record<string, unknown>;
 }
 
+interface JsonRpcNotification {
+  jsonrpc: string;
+  method: string;
+  params?: Record<string, unknown>;
+}
+
 function buildRequest(id: number, method: string, params?: Record<string, unknown>): string {
   const req: JsonRpcRequest = { jsonrpc: JSONRPC_VERSION, id, method };
   if (params) req.params = params;
   return JSON.stringify(req) + '\n';
 }
 
+function buildNotification(method: string, params?: Record<string, unknown>): string {
+  const notif: JsonRpcNotification = { jsonrpc: JSONRPC_VERSION, method };
+  if (params) notif.params = params;
+  return JSON.stringify(notif) + '\n';
+}
+
 // --- stdio transport ------------------------------------------------------
 
 /**
  * Probe an MCP server over stdio by spawning its executable.
+ *
+ * Follows the proper MCP handshake:
+ *   1. Send `initialize` request
+ *   2. Wait for `initialize` response
+ *   3. Send `initialized` notification
+ *   4. Send `tools/list` request (best-effort)
+ *   5. Gracefully close stdin so the server can shut down cleanly
+ *
  * The target should be a path to the server entry point (or command).
  */
 async function probeStdio(target: string, timeout: number): Promise<ProbeResult> {
@@ -68,10 +87,15 @@ async function probeStdio(target: string, timeout: number): Promise<ProbeResult>
 
   return new Promise<ProbeResult>((resolve) => {
     let settled = false;
+    let proc: ChildProcess | null = null;
+
+    // Safety timer — if nothing happens in `timeout` ms, bail out.
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      proc.kill();
+      if (proc) {
+        try { proc.kill(); } catch { /* ignore */ }
+      }
       resolve({
         target,
         transport: 'stdio',
@@ -82,7 +106,7 @@ async function probeStdio(target: string, timeout: number): Promise<ProbeResult>
       });
     }, timeout);
 
-    let proc: ChildProcess;
+    // Spawn the server process.
     try {
       proc = spawn('node', [resolved], {
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -100,12 +124,12 @@ async function probeStdio(target: string, timeout: number): Promise<ProbeResult>
       });
     }
 
-    // readline not needed — we parse raw JSON-RPC lines from stdout buffer
+    // --- stdout: parse JSON-RPC responses ---
     let buffer = '';
 
     proc.stdout!.on('data', (chunk: Buffer) => {
+      if (settled) return;
       buffer += chunk.toString();
-      // Try to extract a complete JSON-RPC response line
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
 
@@ -113,70 +137,189 @@ async function probeStdio(target: string, timeout: number): Promise<ProbeResult>
         if (!line.trim()) continue;
         try {
           const msg = JSON.parse(line.trim());
-          // Listen for the initialize result
+
+          // Handle the initialize result
           if (msg.result && msg.id === 1) {
-            clearTimeout(timer);
-            proc.kill();
-            if (!settled) {
-              settled = true;
-              resolve({
-                target,
-                transport: 'stdio',
-                initResponse: msg.result as MCPInitResponse,
-                latencyMs: Date.now() - startTime,
-                connected: true,
-              });
+            const initResponse = msg.result as MCPInitResponse;
+
+            // Step 3: Send the `initialized` notification (MCP spec requirement).
+            const initializedNotif = buildNotification('initialized');
+            try {
+              proc!.stdin!.write(initializedNotif);
+            } catch {
+              // stdin may already be closing — not a blocker.
+            }
+
+            // Step 4: Send `tools/list` to discover tools (best-effort).
+            const toolsListReq = buildRequest(2, 'tools/list');
+            try {
+              proc!.stdin!.write(toolsListReq);
+            } catch {
+              // stdin may already be closing — tools discovery is best-effort.
+              finishProbe(initResponse, undefined);
             }
           }
+
+          // Handle tools/list result
+          if (msg.result && msg.id === 2) {
+            const toolListResponse = msg.result as MCPToolListResponse;
+            finishProbe(
+              // initResponse was captured earlier from msg.id === 1
+              undefined as unknown as MCPInitResponse,
+              toolListResponse,
+            );
+          }
+
+          // Handle errors from the server
+          if (msg.error && (msg.id === 1 || msg.id === 2)) {
+            const errMsg = msg.error.message ?? 'Unknown server error';
+            clearTimeout(timer);
+            settled = true;
+            finishProbe({ protocolVersion: '' }, undefined, errMsg);
+          }
         } catch {
-          // Ignore non-JSON lines (server logging etc.)
+          // Ignore non-JSON lines (server logging to stdout, etc.)
         }
       }
     });
 
-    // Stderr is reserved for server diagnostics; we ignore it during probing
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    proc.stderr!.on('data', (_chunk: Buffer) => {});
+    // Track the initialize response so we can pair it with tools/list.
+    let capturedInitResponse: MCPInitResponse | null = null;
 
-    proc.on('error', (err) => {
+    function finishProbe(
+      initResp: MCPInitResponse | undefined,
+      toolListResp: MCPToolListResponse | undefined,
+      errorMsg?: string,
+    ): void {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+
+      // Capture init response if provided now or use previously captured one.
+      if (initResp) {
+        capturedInitResponse = initResp;
+      }
+
+      // Gracefully close stdin to signal the server we're done.
+      // This lets the server's transport.onclose handler clean up properly.
+      if (proc && proc.stdin && !proc.stdin.destroyed) {
+        try {
+          proc.stdin.end();
+        } catch {
+          // stdin may already be closed.
+        }
+      }
+
+      // Give the server a short window to process the close, then terminate.
+      const gracefulCloseTimer = setTimeout(() => {
+        if (proc && !proc.killed) {
+          try { proc.kill(); } catch { /* ignore */ }
+        }
+      }, 500);
+
+      // When the process exits, resolve the probe result.
+      const onClose = (code: number | null) => {
+        clearTimeout(gracefulCloseTimer);
+        if (!settled) {
+          settled = true;
+        }
+
+        if (errorMsg) {
+          resolve({
+            target,
+            transport: 'stdio',
+            initResponse: capturedInitResponse ?? { protocolVersion: '' },
+            toolListResponse: toolListResp,
+            latencyMs: Date.now() - startTime,
+            connected: false,
+            error: errorMsg,
+          });
+          return;
+        }
+
+        // code=0 or code=null (signal) after stdin.end() is expected.
+        resolve({
+          target,
+          transport: 'stdio',
+          initResponse: capturedInitResponse ?? { protocolVersion: '' },
+          toolListResponse: toolListResp,
+          latencyMs: Date.now() - startTime,
+          connected: capturedInitResponse !== null,
+          error: capturedInitResponse === null
+            ? `Process exited before sending initialize response (code ${code}).`
+            : undefined,
+        });
+      };
+
+      // If process already exited, call onClose immediately.
+      if (proc && proc.exitCode !== null) {
+        onClose(proc.exitCode);
+      } else if (proc) {
+        proc.once('close', onClose);
+      } else {
+        onClose(null);
+      }
+    }
+
+    // --- stderr: forward as diagnostics (verbose only) ---
+    proc.stderr!.on('data', (_chunk: Buffer) => {
+      // Stderr is reserved for server diagnostics; we silently consume it.
+    });
+
+    // --- process lifecycle errors ---
+    proc.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        target,
+        transport: 'stdio',
+        initResponse: { protocolVersion: '' },
+        latencyMs: Date.now() - startTime,
+        connected: false,
+        error: `Process error: ${err.message}`,
+      });
+    });
+
+    // Fallback close handler: if the process exits before we finish the
+    // handshake, report the failure.
+    proc.once('close', (code) => {
+      // If finishProbe already settled, this is a no-op.
+      // If the process exits prematurely, report it.
       if (!settled) {
         settled = true;
+        clearTimeout(timer);
         resolve({
           target,
           transport: 'stdio',
           initResponse: { protocolVersion: '' },
           latencyMs: Date.now() - startTime,
           connected: false,
-          error: `Process error: ${err.message}`,
+          error: `Process exited unexpectedly with code ${code}. Check that the target is a valid Node.js MCP server entry point.`,
         });
       }
     });
 
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-      if (!settled) {
-        settled = true;
-        if (code !== null && code !== 0) {
-          resolve({
-            target,
-            transport: 'stdio',
-            initResponse: { protocolVersion: '' },
-            latencyMs: Date.now() - startTime,
-            connected: false,
-            error: `Process exited with code ${code}. Check that the target is a valid Node.js MCP server entry point.`,
-          });
-        }
-      }
-    });
-
-    // Send the initialize request
+    // --- Step 1 + 2: Send initialize request ---
     const initReq = buildRequest(1, 'initialize', {
       protocolVersion: '2024-11-05',
       capabilities: {},
       clientInfo: { name: 'mcp-sentinel', version: '0.1.0' },
     });
-    proc.stdin!.write(initReq);
+    try {
+      proc.stdin!.write(initReq);
+    } catch (err) {
+      clearTimeout(timer);
+      settled = true;
+      resolve({
+        target,
+        transport: 'stdio',
+        initResponse: { protocolVersion: '' },
+        latencyMs: Date.now() - startTime,
+        connected: false,
+        error: `Failed to write to stdin: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   });
 }
 
@@ -237,6 +380,12 @@ async function probeSSE(target: string, _timeout: number): Promise<ProbeResult> 
 
 /**
  * Probe an MCP server at `target` and return structured results.
+ *
+ * For full multi-dimension probing (connectivity, protocol, tools,
+ * performance, security), use `probeServer()` from `@mcp-sentinel/core`.
+ *
+ * This lightweight probe is suitable for quick connectivity checks and
+ * server discovery in the `scan` and `load-test` commands.
  *
  * @param target  File path (stdio) or URL (SSE)
  * @param options Transport mode and timeout

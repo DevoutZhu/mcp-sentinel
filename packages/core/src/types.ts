@@ -2,6 +2,8 @@
 // Existing types — keep for backward compatibility with CLI
 // ============================================================
 
+import type { SecurityFinding } from './security-scanner.js';
+
 export type Severity = 'error' | 'warning' | 'info';
 
 export interface RuleResult {
@@ -103,8 +105,8 @@ export interface CliArgs {
 // Probe types — probe.ts
 // ============================================================
 
-/** The four dimensions tested by the probe, in constitution priority order. */
-export type ProbeDimension = 'connectivity' | 'protocol' | 'tools' | 'performance';
+/** The five dimensions tested by the probe, in constitution priority order. */
+export type ProbeDimension = 'connectivity' | 'protocol' | 'tools' | 'performance' | 'security';
 
 /** Result for a single probe dimension. */
 export interface DimensionResult {
@@ -135,6 +137,8 @@ export interface ProbeResult {
   endTime: Date;
   /** Total wall-clock duration in milliseconds. */
   durationMs: number;
+  /** Security scan findings (populated when security scanning is performed). */
+  securityFindings?: SecurityFinding[];
 }
 
 /** Options for probeServer(). */

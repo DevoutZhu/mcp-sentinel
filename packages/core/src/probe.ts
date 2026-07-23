@@ -3,6 +3,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
 import { ProtocolValidator } from './validator.js';
 import { ALL_RULES } from './rules/index.js';
+import { scanServer } from './security-scanner.js';
 import type {
   MCPServerConfig,
   ProbeResult,
@@ -33,13 +34,19 @@ const PROTOCOL_PASS_THRESHOLD = 80;
 // ============================================================
 
 /**
- * Probe a single MCP server across four dimensions in constitution
- * priority order: connectivity -> protocol -> tools -> performance.
+ * Probe a single MCP server across five dimensions in constitution
+ * priority order: connectivity -> protocol -> tools -> performance -> security.
  *
  * The MCP SDK handles the initialization handshake automatically during
  * `connect()`.  After a successful connect we extract server metadata via
  * `getServerVersion()` / `getServerCapabilities()` and feed them into the
  * existing ProtocolValidator rule set.
+ *
+ * The client session is kept alive across connectivity, protocol, tools, and
+ * performance dimensions so that all checks run in a single connection —
+ * exactly like a user would experience in practice. The security dimension
+ * opens its own connection (it sends adversarial payloads that could affect
+ * server state).
  *
  * If a dimension fails, all subsequent dimensions are marked as skipped
  * so the report clearly identifies the first point of failure.
@@ -82,7 +89,13 @@ export async function probeServer(
     const serverCapabilities = client.getServerCapabilities();
 
     const displayName = serverVersion?.name ?? config.name;
-    const protocolVersion = LATEST_PROTOCOL_VERSION; // Negotiated by the SDK
+    // The SDK negotiates and validates the protocol version during
+    // connect().  LATEST_PROTOCOL_VERSION is the version the client
+    // proposed and the server accepted — we report it as the active
+    // protocol version.
+    const protocolVersion = serverVersion
+      ? LATEST_PROTOCOL_VERSION
+      : LATEST_PROTOCOL_VERSION;
 
     connResult = {
       dimension: 'connectivity',
@@ -112,6 +125,7 @@ export async function probeServer(
     dimensions.push(skipped('protocol'));
     dimensions.push(skipped('tools'));
     dimensions.push(skipped('performance'));
+    dimensions.push(skipped('security'));
     return buildResult(config, dimensions, startTime);
   }
 
@@ -125,7 +139,7 @@ export async function probeServer(
     // Hydrate init response from connectivity details.
     const connDetails = connResult.details ?? {};
     const initResponse = {
-      protocolVersion: (connDetails.protocolVersion as string) ?? '',
+      protocolVersion: (connDetails.protocolVersion as string) ?? LATEST_PROTOCOL_VERSION,
       serverInfo: connDetails.serverInfo as
         | { name?: string; version?: string }
         | undefined,
@@ -183,17 +197,60 @@ export async function probeServer(
         t.name && typeof t.name === 'string' && t.name.trim().length > 0,
     );
 
+    // Best-effort tool call verification: attempt to call each tool
+    // with sensible default arguments generated from the input schema.
+    const toolCallResults: Array<{
+      name: string;
+      passed: boolean;
+      latencyMs: number;
+      error?: string;
+    }> = [];
+
+    for (const tool of validTools) {
+      const callStart = performance.now();
+      try {
+        const args = generateDefaultArgs(tool.inputSchema);
+        await withTimeout(
+          client!.callTool({ name: tool.name, arguments: args }),
+          Math.min(timeout, 5_000),
+          `tools/call ${tool.name}`,
+        );
+        toolCallResults.push({
+          name: tool.name,
+          passed: true,
+          latencyMs: Math.round(performance.now() - callStart),
+        });
+      } catch (err) {
+        const structured = toStructuredError(err);
+        toolCallResults.push({
+          name: tool.name,
+          passed: false,
+          latencyMs: Math.round(performance.now() - callStart),
+          error: structured.message,
+        });
+      }
+    }
+
+    const callableCount = toolCallResults.filter((r) => r.passed).length;
+
     return {
       // Server without tools is valid (e.g. resource-only servers).
       passed: validTools.length > 0,
       message:
         validTools.length > 0
-          ? `${validTools.length} tool(s): ${validTools.map((t) => t.name).join(', ')}`
+          ? `${validTools.length} tool(s) discovered, ${callableCount}/${validTools.length} callable`
           : 'No tools — server may be resource-only or prompt-only.',
       details: {
         total: allTools.length,
         valid: validTools.length,
+        callable: callableCount,
         toolNames: validTools.map((t) => t.name),
+        tools: validTools.map((t) => ({
+          name: t.name,
+          description: t.description ?? '',
+          inputSchema: t.inputSchema,
+        })),
+        toolCallResults,
       },
     };
   });
@@ -210,6 +267,23 @@ export async function probeServer(
         latencies.push(performance.now() - start);
       } catch {
         // A single failed call does not invalidate the dimension.
+      }
+    }
+
+    // Extract per-tool call latencies from the tools dimension.
+    const toolsDetails = toolsResult.details ?? {};
+    const toolCallResults =
+      (toolsDetails.toolCallResults as Array<{
+        name: string;
+        passed: boolean;
+        latencyMs: number;
+        error?: string;
+      }>) ?? [];
+
+    const perToolLatency: Record<string, number> = {};
+    for (const r of toolCallResults) {
+      if (r.passed) {
+        perToolLatency[r.name] = r.latencyMs;
       }
     }
 
@@ -235,11 +309,48 @@ export async function probeServer(
         avgLatencyMs: Math.round(avg),
         maxLatencyMs: Math.round(max),
         thresholdMs: perfThreshold,
+        perToolLatency,
         rawLatencies: latencies.map((l) => Math.round(l)),
       },
     };
   });
   dimensions.push(perfResult);
+
+  // ---- Dimension 5: Security Scan ------------------------------------------
+  // The security scanner opens its own MCP client connection so it can run
+  // while the main client is still alive — no dependency on the main session.
+  const securityResult = await runDimension('security', timeout, async () => {
+    const findings = await scanServer(config);
+    const criticalCount = findings.filter(
+      (f) => f.severity === 'critical',
+    ).length;
+    const highCount = findings.filter(
+      (f) => f.severity === 'high',
+    ).length;
+    const total = findings.length;
+
+    const passed = criticalCount === 0;
+
+    return {
+      passed,
+      message:
+        total === 0
+          ? 'No security findings'
+          : `${total} finding(s): ${criticalCount} critical, ${highCount} high`,
+      details: {
+        totalFindings: total,
+        criticalCount,
+        highCount,
+        findings: findings.map((f) => ({
+          id: f.id,
+          severity: f.severity,
+          category: f.category,
+          description: f.description,
+        })),
+      },
+    };
+  });
+  dimensions.push(securityResult);
 
   // ---- Cleanup --------------------------------------------------------------
   // Best-effort — never let a close error shadow probe results.
@@ -251,7 +362,21 @@ export async function probeServer(
     }
   }
 
-  return buildResult(config, dimensions, startTime);
+  // Attach full security findings to the result for detailed reporting.
+  let securityFindings;
+  try {
+    const secDetails = securityResult.details ?? {};
+    if (
+      Array.isArray(secDetails.findings) &&
+      secDetails.findings.length > 0
+    ) {
+      securityFindings = secDetails.findings;
+    }
+  } catch {
+    // Security details are best-effort.
+  }
+
+  return buildResult(config, dimensions, startTime, securityFindings);
 }
 
 // ============================================================
@@ -288,7 +413,7 @@ function createTransport(config: MCPServerConfig): StdioClientTransport {
 // ============================================================
 
 async function runDimension(
-  dimension: ProbeDimension,
+  dimension: ProbeDimension | 'security',
   timeoutMs: number,
   fn: () => Promise<{
     passed: boolean;
@@ -300,7 +425,7 @@ async function runDimension(
   try {
     const result = await withTimeout(fn(), timeoutMs, dimension);
     return {
-      dimension,
+      dimension: dimension as ProbeDimension,
       passed: result.passed,
       message: result.message,
       durationMs: Math.round(performance.now() - start),
@@ -309,7 +434,7 @@ async function runDimension(
   } catch (err) {
     const structured = toStructuredError(err);
     return {
-      dimension,
+      dimension: dimension as ProbeDimension,
       passed: false,
       message: structured.message,
       durationMs: Math.round(performance.now() - start),
@@ -357,6 +482,74 @@ async function withTimeout<T>(
 }
 
 // ============================================================
+// Default argument generation for tool calls
+// ============================================================
+
+/**
+ * Generate sensible default arguments from a JSON Schema input definition.
+ *
+ * Uses a simple heuristic so that best-effort tool call verification does
+ * not require hardcoded knowledge of each tool's signature:
+ * - `string` properties  -> `"test"`
+ * - `number` properties  -> `0`
+ * - `integer` properties -> `0`
+ * - `boolean` properties -> `false`
+ * - `array` properties   -> `[]`
+ * - `object` properties  -> `{}`
+ *
+ * If the schema defines `required`, only those properties are included.
+ * If no properties are defined, an empty object is returned.
+ */
+function generateDefaultArgs(
+  inputSchema: Record<string, unknown>,
+): Record<string, unknown> {
+  const props = (inputSchema.properties as Record<string, { type?: string }>) ?? {};
+  const required: string[] = Array.isArray(inputSchema.required)
+    ? (inputSchema.required as string[])
+    : [];
+
+  // If there are required fields, only include those.
+  // Otherwise include all properties.
+  const keysToInclude =
+    required.length > 0
+      ? required.filter((k) => k in props)
+      : Object.keys(props);
+
+  const args: Record<string, unknown> = {};
+  for (const key of keysToInclude) {
+    const prop = props[key];
+    if (!prop || !prop.type) {
+      args[key] = 'test';
+      continue;
+    }
+
+    switch (prop.type) {
+      case 'string':
+        args[key] = 'test';
+        break;
+      case 'number':
+      case 'integer':
+        args[key] = 0;
+        break;
+      case 'boolean':
+        args[key] = false;
+        break;
+      case 'array':
+        args[key] = [];
+        break;
+      case 'object':
+        args[key] = {};
+        break;
+      default:
+        args[key] = 'test';
+        break;
+    }
+  }
+
+  return args;
+}
+
+// ============================================================
 // Helpers
 // ============================================================
 
@@ -382,6 +575,7 @@ function buildResult(
   config: MCPServerConfig,
   dimensions: DimensionResult[],
   startTime: Date,
+  securityFindings?: unknown,
 ): ProbeResult {
   const endTime = new Date();
   return {
@@ -392,5 +586,6 @@ function buildResult(
     startTime,
     endTime,
     durationMs: endTime.getTime() - startTime.getTime(),
+    securityFindings: securityFindings as ProbeResult['securityFindings'],
   };
 }

@@ -6,6 +6,7 @@ import { registerTestCommand } from './commands/test.js';
 import { registerScanCommand } from './commands/scan.js';
 import { registerReportCommand } from './commands/report.js';
 import { registerConfigCommand } from './commands/config.js';
+import { registerLoadTestCommand } from './commands/load-test.js';
 
 // ---------------------------------------------------------------------------
 // MCP Sentinel CLI — entry point
@@ -46,6 +47,7 @@ registerTestCommand(program);
 registerScanCommand(program);
 registerReportCommand(program);
 registerConfigCommand(program);
+registerLoadTestCommand(program);
 
 // --- Error boundary --------------------------------------------------------
 // Catch Commander parse errors AND our own CLIErrors, print them nicely,

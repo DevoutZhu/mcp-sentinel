@@ -30,6 +30,27 @@ export { probeServer } from './probe.js';
 export { generateReport } from './reporter.js';
 
 // ============================================================
+// Load tester
+// ============================================================
+
+export { loadTest, rampUpTest } from './load-tester.js';
+
+// ============================================================
+// Security scanner
+// ============================================================
+
+export {
+  scanServer,
+  generateSecurityReport,
+  isSSRFParam,
+  detectPII,
+  SSRF_SUSPICIOUS_PARAMS,
+  PII_PATTERNS,
+  INJECTION_PAYLOADS,
+} from './security-scanner.js';
+export type { SecurityFinding } from './security-scanner.js';
+
+// ============================================================
 // Shared types
 // ============================================================
 
@@ -59,3 +80,15 @@ export type {
   // Reporter
   ReportFormat,
 } from './types.js';
+
+export type {
+  // Load tester
+  LoadTestConfig,
+  LoadTestOptions,
+  LoadTestResult,
+  LoadTestError,
+  LatencyStats,
+  RampUpOptions,
+  RampUpStage,
+  RampUpTestResult,
+} from './load-tester.js';
