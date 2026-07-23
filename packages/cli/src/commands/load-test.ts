@@ -1,10 +1,10 @@
 import { Command } from 'commander';
-import { loadTest, rampUpTest } from '@mcp-sentinel/core';
+import { loadTest, rampUpTest } from 'mcp-sentinel-core';
 import type {
   LoadTestConfig,
   LoadTestResult,
   RampUpTestResult,
-} from '@mcp-sentinel/core';
+} from 'mcp-sentinel-core';
 import { probe, guessTransport, type TransportMode } from '../utils/probe.js';
 import {
   configureLogger,

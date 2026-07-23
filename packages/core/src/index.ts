@@ -92,3 +92,20 @@ export type {
   RampUpStage,
   RampUpTestResult,
 } from './load-tester.js';
+
+// ============================================================
+// Monitor agent
+// ============================================================
+
+export { MonitorAgent, createMonitorAgent } from './monitor-agent.js';
+export type {
+  AlertThresholds,
+  MonitorConfig,
+  AlertContext,
+  Alert,
+  AutoFix,
+  MonitorRun,
+  AnalyzeFn,
+  MonitorCallbacks,
+  MonitorAgentFromFileOptions,
+} from './monitor-agent.js';

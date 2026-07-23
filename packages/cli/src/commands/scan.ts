@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { ProtocolValidator, ALL_RULES } from '@mcp-sentinel/core';
+import { ProtocolValidator, ALL_RULES } from 'mcp-sentinel-core';
 import { probe, guessTransport, type ProbeResult } from '../utils/probe.js';
 import {
   configureLogger,

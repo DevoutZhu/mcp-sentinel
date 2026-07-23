@@ -1,5 +1,5 @@
 {
-  "name": "@mcp-sentinel/core",
+  "name": "mcp-sentinel-core",
   "version": "0.1.0",
   "description": "MCP protocol validation engine",
   "type": "module",

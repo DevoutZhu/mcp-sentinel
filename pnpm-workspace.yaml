@@ -2,3 +2,5 @@ packages:
   - 'packages/*'
 allowBuilds:
   esbuild: true
+minimumReleaseAgeExclude:
+  - mcp-sentinel-core@0.1.0

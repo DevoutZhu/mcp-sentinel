@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import * as path from 'node:path';
-import { probeServer } from '@mcp-sentinel/core';
-import type { MCPServerConfig, ProbeResult, DimensionResult } from '@mcp-sentinel/core';
+import { probeServer } from 'mcp-sentinel-core';
+import type { MCPServerConfig, ProbeResult, DimensionResult } from 'mcp-sentinel-core';
 import { guessTransport, type TransportMode } from '../utils/probe.js';
 import {
   configureLogger,

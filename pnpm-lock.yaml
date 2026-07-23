@@ -220,6 +220,9 @@ importers:
         specifier: ^8.2.0
         version: 8.2.0
     devDependencies:
+      '@types/node':
+        specifier: ^22.20.1
+        version: 22.20.1
       '@typescript-eslint/eslint-plugin':
         specifier: ^7.18.0
         version: 7.18.0(@typescript-eslint/parser@7.18.0(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint@8.57.1(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
@@ -247,28 +250,18 @@ importers:
 
   packages/cli:
     dependencies:
-      '@mcp-sentinel/core':
-        specifier: workspace:*
-        version: link:../core
       chalk:
         specifier: ^5.4.0
         version: 5.6.2
       commander:
         specifier: ^13.1.0
         version: 13.1.0
+      mcp-sentinel-core:
+        specifier: 0.1.0
+        version: 0.1.0(supports-color@7.2.0)
       ora:
         specifier: ^8.2.0
         version: 8.2.0
-    devDependencies:
-      '@types/node':
-        specifier: ^22.0.0
-        version: 22.20.1
-      typescript:
-        specifier: ^5.7.0
-        version: 5.9.3
-      vitest:
-        specifier: ^3.0.0
-        version: 3.2.7(@types/node@22.20.1)(supports-color@7.2.0)
 
   packages/core:
     dependencies:
@@ -1563,6 +1556,9 @@ packages:
   math-intrinsics@1.1.0:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
     engines: {node: '>= 0.4'}
+
+  mcp-sentinel-core@0.1.0:
+    resolution: {integrity: sha512-W1/QiorAuhzVImEwT1FR6x6b1WPrgxcyYxHYxkPFLgACk1UOXqsf4/GZuRE8eC1OExX7FfUIMroC/MWcwdGtyw==}
 
   media-typer@1.1.0:
     resolution: {integrity: sha512-aisnrDP4GNe06UcKFnV5bfMNPBUw4jsLGaWwWfnH3v02GnBuXX2MCVn5RbrWo0j3pczUilYblq7fQ7Nw2t5XKw==}
@@ -3526,6 +3522,15 @@ snapshots:
       '@jridgewell/sourcemap-codec': 1.5.5
 
   math-intrinsics@1.1.0: {}
+
+  mcp-sentinel-core@0.1.0(supports-color@7.2.0):
+    dependencies:
+      '@modelcontextprotocol/sdk': 1.29.0(supports-color@7.2.0)(zod@3.25.76)
+      chalk: 5.6.2
+      zod: 3.25.76
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - supports-color
 
   media-typer@1.1.0: {}
 
