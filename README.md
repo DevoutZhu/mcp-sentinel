@@ -205,29 +205,46 @@ mcp-sentinel report --format html -o results.html
 
 ---
 
-## Architecture
+## Architecture / 系统架构
 
 ```mermaid
-flowchart TB
-    CLI[CLI<br/>Commander + Chalk + Ora]
-    CORE[Core Engine<br/>@mcp-sentinel/core]
+graph TB
+    subgraph CLI["命令行界面 (CLI)"]
+        TEST["🔍 test 测试单个服务器"]
+        SCAN["📂 scan 批量扫描"]
+        MONITOR["🔄 monitor 7×24 巡检 Agent"]
+        REPORT["📊 report 查看报告"]
+    end
 
-    CLI -->|test| PROBE[Probe Layer<br/>stdio / SSE transport]
-    CLI -->|scan| DISCOVER[Discovery<br/>recursive mcp.json walk]
-    CLI -->|load-test| LOAD[Load Tester<br/>concurrent workers + ramp-up]
-    CLI -->|config| CONFIG[Config Store<br/>file / env / defaults]
-    CLI -->|report| REPORT[Report Viewer<br/>terminal / JSON / HTML]
+    subgraph CORE["核心引擎 (Core Engine)"]
+        PARSER["📋 配置解析器 / Config Parser"]
+        PROBE["🔍 MCP 探针 / MCP Probe"]
+        REPORTER["📊 报告生成器 / Reporter"]
+        SECURITY["🔒 安全扫描器 / Security Scanner"]
+        LOADTEST["⚡ 性能压测 / Load Tester"]
+        MONITOR_AGENT["🤖 巡检 Agent / Monitor Agent"]
+    end
 
-    PROBE --> CORE
-    DISCOVER --> PROBE
-    LOAD --> PROBE
+    subgraph TRANSPORT["传输层 (Transport)"]
+        STDIO["stdio 本地进程"]
+        SSE["SSE 远程服务"]
+    end
 
-    CORE --> VALIDATOR[Protocol Validator<br/>19 rules, 5 severity levels]
-    CORE --> SECURITY[Security Scanner<br/>OWASP LLM Top-10 detection]
-    CORE --> REPORTER[Report Generator<br/>structured output]
+    subgraph RESULT["输出结果 (Output)"]
+        TERMINAL["🖥️ 终端彩色输出"]
+        JSON["📄 JSON 数据"]
+        HTML["🌐 HTML 报告"]
+        MARKDOWN["📝 Markdown 报告"]
+    end
 
-    VALIDATOR --> TARGET[MCP Server<br/>stdio process or SSE endpoint]
-    SECURITY --> TARGET
+    CLI --> CORE
+    CORE --> TRANSPORT
+    TRANSPORT --> RESULT
+
+    style CLI fill:#e3f2fd,stroke:#1976d2
+    style CORE fill:#e8f5e9,stroke:#388e3c
+    style TRANSPORT fill:#f3e5f5,stroke:#7b1fa2
+    style RESULT fill:#fff3e0,stroke:#f57c00
 ```
 
 ```
